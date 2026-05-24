@@ -2,9 +2,9 @@
 #define _NOODLES_H_
 
 
-int noodles_create (nthread_t nthread, void * (* t_func) (void *), void * tf_arg);
-int noodles_join (nthread_t nthread);
-int noodles_yield (nthread_t nthread);
-int noodles_exit (nthread_t nthread);
+int noodles_create (nthread_t * nthread, void * (* t_func) (void *), void * tf_arg);
+int noodles_join (nthread_t * nthread);
+int noodles_yield (nthread_t * nthread);
+int noodles_exit (nthread_t * nthread);
 
 #endif /** _NOODLES_H_ */
