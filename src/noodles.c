@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+#include <setjmp.h>
 
 
 static int active_scheduler = 0;
@@ -45,13 +46,19 @@ int activate_timer () {
 
 int thread_switch() {
 
+    // needs to be in assembly:
+    // save the current thread context in the context variable
+    // read all values from the context switch mem location (on heap) if new thread into the registers
+
     return 0;
 
 }
 
+static jmp_buf jmp;
 
 int thread_schedule () {
 
+    setjmp (jmp);
     // setjmp here
     // 1. Disable the timer, if active (so that scheduling and context switch 
     //    can happen without preemption)
@@ -73,7 +80,7 @@ int thread_schedule () {
 
 int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * narg) {
 
-    // 1. Main: Set new thread's state and stack
+    /* 1. Main: Set new thread's state and stack */
     nthread = malloc(sizeof(nthread_t));
     nthread->tid = tid_cnt++;
     nthread->t_state = READY;
@@ -84,14 +91,20 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); 
 
     if (nthread->t_stack == MAP_FAILED) {
-        printf ("error: thread creation failed, stack space not available\n");
+        printf ("error: thread creation failed: stack space not available\n");
         return -1;
     }
 
-    // TODO: Add guard page as well to make sure stack stays 
-    //      limited and does not overwrite any other thread's stack
+    /* Guard page prevents stack spill */
+    void * guard = mmap (nthread->t_stack + MAX_STACK_SIZE, MAX_STACK_SIZE, PROT_NONE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    
+    if (guard == MAP_FAILED) {
+        printf ("error: thread creation failed: stack guard space not available\n");
+        return -1;
+    } 
 
-    // 2. Main: Initialize the scheduler queue if not done (lazy init)
+    /* 2. Main: Initialize the scheduler queue if not done (lazy init), add main-worker */
     if (s_queue_head == NULL) {
 
         nthread_t t_main;
@@ -106,8 +119,8 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
         s_queue_head->prev = s_queue_head;
     }
 
-    // 3. Main: Add thread to schedular queue (FIFO circular queue, hence new 
-    //    thread is always at end i.e. prev of head)
+    /* 3. Main: Add thread to schedular queue (FIFO circular queue, hence new 
+          thread is always at end i.e. prev of head) */
 
     schd_q * s_queue_ent = malloc (sizeof (schd_q));
     s_queue_ent->t = * nthread;
@@ -118,11 +131,10 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
     goto main_worker_ctx;
 
 start_schd:
-    // 4. Main: If scheduler is not running, start running it
+    /* 4. Main: If scheduler is not running, start running it */
     if (!active_scheduler) {
         active_scheduler = 1;
-        thread_schedule(active_scheduler);
-        
+        thread_schedule();
     }
 main_worker_ctx: 
     if (!main_ctx_set) {
@@ -130,7 +142,6 @@ main_worker_ctx:
         // TODO: add context for main.
         // Main - worker: save context for the worker here
     }
-    
     if (!active_scheduler) {
         goto start_schd;
     }
@@ -157,7 +168,7 @@ int noodles_exit (nthread_t * nthread) {
 
 int noodles_yield (nthread_t * nthread) {
 
-    
+    // put the thread on sleep/blocked queue
     return 0;
 }
 
