@@ -2,6 +2,7 @@
 #define _NOODLES_INTERNAL_H_
 
 #include <signal.h>
+#include <stdint.h>
 #include <unistd.h>
 
 static inline size_t _get_pagesize () {
@@ -35,7 +36,10 @@ typedef struct _nthread_t {
 
 
 typedef struct _ncontext_t {
-    void * cxt;
+    uint64_t x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, x29;
+    uint64_t x8;
+    uint64_t lr;
+    uint64_t sp;
 } ncontext_t;
 
 
@@ -49,5 +53,9 @@ typedef struct _schd_q {
 } schd_q ;
 
 typedef void (* sig_handler) (int) ;
+
+extern void save_ctx (void * ctx);
+extern void load_ctx (void * ctx);
+extern void switch_ctx (void * ctx);
 
 #endif /** _NOODLES_INTERNALS_H_ */
