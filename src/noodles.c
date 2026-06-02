@@ -1,103 +1,141 @@
 #include "_noodles.h"
 #include "noodles.h"
 
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/time.h>
-#include <setjmp.h>
+#include <time.h>
 
 static int active_scheduler = 0;
 static int active_timer     = 0;
 static int main_ctx_set     = 0;
 static int tid_cnt          = 0;
 
-schd_q * s_queue_cur  = NULL;
-schd_q * s_queue_head = NULL;
+static schd_q * s_queue_cur  = NULL;
+static schd_q * s_queue_head = NULL;
 
-ucontext_t prempt_ctx;
+static ucontext_t prempt_ctx;
 
 static sigjmp_buf jmp;
 static volatile sig_atomic_t can_jmp = 0;
 
-// sig_handler old_alarm_handler = NULL;
+static sig_handler old_alarm_handler = NULL;
 
 
-sig_handler alarm_handler (int sig, siginfo_t * info, ucontext_t * context) {
-    // figure out how to go to scheduler without breaking reentrancy rules
-    // longjmp to scheduler
-    prempt_ctx = *context;
-    siglongjmp (jmp, NULL);
-    return NULL;
+static void alarm_handler (int sig, siginfo_t * info, void * context) {
+
+    printf ("Calling the timer func\n");
+    // prempt_ctx = *((ucontext_t *) context);
+    // siglongjmp (jmp, NULL);
+
 }
 
-int disable_timer () {
+static timer_t switch_timer;
 
+
+static int init_timer () {
+
+    struct sigaction sa;
+    sa.sa_sigaction = alarm_handler;
+    sigemptyset (&sa.sa_mask);
+    sigaction (SIGUSR1, &sa, NULL);
+
+    struct sigevent sigev;
+
+    sigev.sigev_notify = SIGEV_SIGNAL;
+    sigev.sigev_signo  = SIGUSR1;
+    sigev.sigev_notify_attributes = NULL;
+
+    return timer_create (CLOCK_MONOTONIC, &sigev, &switch_timer);
+}
+
+static int disable_timer () {
+
+    struct itimerspec t_spec_pause = {0};
+
+    if (timer_settime (switch_timer, 0, &t_spec_pause, NULL) == -1) {
+        printf ("err: unable to pause switch timer\n");
+        return -1;
+    }
     return 0;
 }
 
-int activate_timer () {
+static int activate_timer () {
 
-    // set timer interval
-    struct itimerval timer;
+    struct itimerspec t_spec;
+    t_spec.it_value.tv_sec = 0;    
+    t_spec.it_value.tv_nsec = 1000000;  
+    t_spec.it_interval.tv_sec = 0;  
+    t_spec.it_interval.tv_nsec = 1000000; 
 
-    timer.it_interval.tv_sec = 0;
-    timer.it_interval.tv_usec = 150000;
-
-    timer.it_value.tv_sec = 0;
-    timer.it_value.tv_usec = 100000;
-
-    // register new handler
-    // old_alarm_handler = signal(SIGALRM, new_alarm_handler);
-
-    // start timer
-    // setitimer(ITIMER_REAL, &timer, NULL);
+    if (timer_settime (switch_timer, 0, &t_spec, NULL) == -1) {
+        printf ("err: unable to start switch timer\n");
+        return -1;
+    }
     return 0;
 }
 
 
 
-int thread_schedule () {
+static int thread_schedule () {
 
-    // setjmp here
-    sigsetjmp (jmp, NULL);
+    if (init_timer() == -1) {
+        printf ("err: unable to create switch timer!\n");
+        return -1;
+    }
 
-    /* 1. Disable the timer, if active (so that scheduling and context switch 
-          can happen without preemption) */
+    // sigsetjmp (jmp, NULL);
 
+    /* Disable preemption while scheduling and context switch */
     if (active_timer) {
         disable_timer ();
         active_timer = 0;
     }
 
-    // 2. Save current thread's context -> point at which timer prempted it
-    // s_queue_cur->cxt = prempt_ctx;
-    // 2. If thread count is one, i.e. only main thread remaining, exit from the loop. continue otherwise.
-    // 3. Find the next thread to run.
-    // 4. If next thread is different than current thread, load context, 
+    if (s_queue_cur->next == s_queue_cur && s_queue_cur == s_queue_head) {
 
-    register int y = 200;
-    printf ("context will now be switched...\n");
+        active_scheduler = 0;
+        main_ctx_set     = 0;
+        tid_cnt          = 0;
+        active_timer     = 0;
 
-    // save_ctx (&glb_ctx);
-    // if (switch1) {
-    //     switch1 = 0;
-        // load_ctx (&s_queue_head->cxt);
-    // }
+        ncontext_t main_ctx = s_queue_head->cxt;
+        s_queue_head = s_queue_cur = NULL;
+
+        load_ctx (&main_ctx);
+    } 
+    else {
+        if (s_queue_cur->t.t_state == READY) {
+            // begin thread function execution
+            // assign the declared the stack for the thread here?
+            // initialize thread context here?
 
 
-    
-    printf ("context was switched this won't be printed...\n");
+            // 3. Save current thread's context -> point at which timer prempted it
+            // s_queue_cur->cxt = prempt_ctx;
 
-    printf ("Is y changed after switch?: %d\n", y);
-    if (!active_timer) {
-        activate_timer();
+            // 4. If next thread is different than current thread, load context, 
+
+            
+
+        }
+
+        if (!active_timer) {
+            activate_timer();
+        }
     }
-
 
     return 0;
 }
 
+/**
+ * Create a thread, triggered by user's request.
+ * If there exists no active thread, then:
+ *  1. The main-worker thread would be created.
+ *  2. The scheduler would be started/restarted.
+ */
 int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * narg) {
 
     /* 1. Main: Initialize the scheduler queue if not done (lazy init), add main-worker */
@@ -111,6 +149,8 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
 
         s_queue_cur = s_queue_head = malloc (sizeof (schd_q));
         s_queue_head->t = t_main;
+        s_queue_head->next = malloc (sizeof (schd_q)); 
+        s_queue_head->prev = malloc (sizeof (schd_q));
         s_queue_head->next = s_queue_head;
         s_queue_head->prev = s_queue_head;
     }
@@ -141,35 +181,28 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
 
     schd_q * s_queue_ent = malloc (sizeof (schd_q));
     s_queue_ent->t = * nthread;
-    // TODO: add context for current thread -> equal to nt_func add
-    // s_queue_ent->cxt.sp = nthread->t_stack;
     s_queue_ent->next = s_queue_head;
     s_queue_ent->prev = s_queue_head->prev;
-    s_queue_head->prev->next = s_queue_head->prev = s_queue_ent;
+    s_queue_head->prev->next = s_queue_ent;
+    s_queue_head->prev = s_queue_ent;
 
-    register int x = 100;
-    printf ("main thread created, now setting ctx...\n");
     goto main_worker_ctx;
 
 start_schd:
     /* 4. Main: If scheduler is not running, start running it */
     if (!active_scheduler) {
         active_scheduler = 1;
-        printf ("schedular started...\n");
-        thread_schedule();
+        return thread_schedule();
     }
 main_worker_ctx: 
     if (!main_ctx_set) {
         main_ctx_set = 1;
-        printf ("main context needs to be set...\n");
-        // TODO: Main - worker: save context for the worker here
-        // save_ctx (&s_queue_head->cxt);
+        save_ctx (&s_queue_head->cxt);
     }
-    if (!active_scheduler) {
-        printf ("schedular needs to be started...\n");
+    if (!active_scheduler && s_queue_head) {
         goto start_schd;
     }
-    printf ("Is x changed after switch?:%d\n", x);
+
     return 0;
 }
 
