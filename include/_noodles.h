@@ -20,6 +20,7 @@ static inline size_t _get_pagesize () {
 #define READY               1
 #define RUNNING             2
 #define BLOCKED             4
+#define FINISHED            8
 
 #define MAX_STACK_SIZE      _get_pagesize()
 
@@ -34,22 +35,10 @@ typedef struct _nthread_t {
 
 } nthread_t ;
 
-
-typedef struct _ncontext_t {
-
-    uint64_t x0, x1, x2, x3, x4, x5, x6, x7, x8, x9;
-    uint64_t x10, x11, x12, x13, x14, x15, x16, x17, x18, x19;
-    uint64_t x20, x21, x22, x23, x24, x25, x26, x27, x28, x29;
-    uint64_t lr;
-    uint64_t sp;
-    
-} ncontext_t;
-
-
 typedef struct _schd_q {
 
     nthread_t t;
-    ncontext_t cxt;
+    mcontext_t cxt;
     struct _schd_q * next;
     struct _schd_q * prev;
 

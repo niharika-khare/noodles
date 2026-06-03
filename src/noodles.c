@@ -16,7 +16,7 @@ static int tid_cnt          = 0;
 static schd_q * s_queue_cur  = NULL;
 static schd_q * s_queue_head = NULL;
 
-static ucontext_t prempt_ctx;
+static mcontext_t prempt_ctx;
 
 static sigjmp_buf jmp;
 static volatile sig_atomic_t can_jmp = 0;
@@ -26,9 +26,12 @@ static sig_handler old_alarm_handler = NULL;
 
 static void alarm_handler (int sig, siginfo_t * info, void * context) {
 
-    printf ("Calling the timer func\n");
-    // prempt_ctx = *((ucontext_t *) context);
-    // siglongjmp (jmp, NULL);
+    char msg[30] = "Inside the signal handler...\n";
+    write (STDOUT_FILENO, msg, sizeof (msg));
+    ucontext_t * u_ctx = (ucontext_t *) context;
+    prempt_ctx = u_ctx->uc_mcontext;
+    
+    siglongjmp (jmp, 2);
 
 }
 
@@ -37,9 +40,11 @@ static timer_t switch_timer;
 
 static int init_timer () {
 
+    printf ("Creating context switch timer...\n");
     struct sigaction sa;
     sa.sa_sigaction = alarm_handler;
     sigemptyset (&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
     sigaction (SIGUSR1, &sa, NULL);
 
     struct sigevent sigev;
@@ -53,6 +58,8 @@ static int init_timer () {
 
 static int disable_timer () {
 
+    printf ("Disabling timer...\n");
+
     struct itimerspec t_spec_pause = {0};
 
     if (timer_settime (switch_timer, 0, &t_spec_pause, NULL) == -1) {
@@ -64,11 +71,13 @@ static int disable_timer () {
 
 static int activate_timer () {
 
+    printf ("Activating timer...\n");
+
     struct itimerspec t_spec;
     t_spec.it_value.tv_sec = 0;    
-    t_spec.it_value.tv_nsec = 1000000;  
+    t_spec.it_value.tv_nsec = 100000;  
     t_spec.it_interval.tv_sec = 0;  
-    t_spec.it_interval.tv_nsec = 1000000; 
+    t_spec.it_interval.tv_nsec = 100000; 
 
     if (timer_settime (switch_timer, 0, &t_spec, NULL) == -1) {
         printf ("err: unable to start switch timer\n");
@@ -86,45 +95,72 @@ static int thread_schedule () {
         return -1;
     }
 
-    // sigsetjmp (jmp, NULL);
+    if (sigsetjmp (jmp, 2) != 0) {
+        printf ("Here after the context switch jmp\n");
+    }
+    
 
     /* Disable preemption while scheduling and context switch */
     if (active_timer) {
         disable_timer ();
         active_timer = 0;
-    }
+
+        schd_q * prev_thread = s_queue_cur;
+        s_queue_cur = s_queue_cur->next;
+
+        prev_thread->cxt = prempt_ctx;
+        printf ("Saved context for tid: %d\n", prev_thread->t.tid);
+        if (prev_thread->t.t_state == FINISHED) {
+            printf ("Deallocating prev finished thread %d...\n", prev_thread->t.tid);
+            free (prev_thread);
+        }
+    }    
 
     if (s_queue_cur->next == s_queue_cur && s_queue_cur == s_queue_head) {
+
+        printf ("No thread in queue, resuming main-worker context...\n");
 
         active_scheduler = 0;
         main_ctx_set     = 0;
         tid_cnt          = 0;
         active_timer     = 0;
 
-        ncontext_t main_ctx = s_queue_head->cxt;
+        mcontext_t main_ctx = s_queue_cur->cxt;
         s_queue_head = s_queue_cur = NULL;
 
         load_ctx (&main_ctx);
     } 
     else {
-        if (s_queue_cur->t.t_state == READY) {
+        /* main worker thread */
+        if (s_queue_cur == s_queue_head) {
+            printf ("Picked up main thread...\n");
+        }
+        else if (s_queue_cur->t.t_state == READY) {
+            printf ("Picked up user thread %d...\n", s_queue_cur->t.tid);
+
+            s_queue_cur->prev->next = s_queue_cur->next;
+            s_queue_cur->next->prev = s_queue_cur->prev;
+
+            sleep (1);
+            s_queue_cur->t.t_state = FINISHED;
+
+            printf ("Finished user thread now sleeping...\n");
+
             // begin thread function execution
             // assign the declared the stack for the thread here?
             // initialize thread context here?
 
-
-            // 3. Save current thread's context -> point at which timer prempted it
-            // s_queue_cur->cxt = prempt_ctx;
-
             // 4. If next thread is different than current thread, load context, 
-
-            
-
         }
 
         if (!active_timer) {
+            active_timer = 1;
             activate_timer();
         }
+        if (s_queue_cur != s_queue_head) sleep (1);
+
+        printf ("Loading context of tid %d...\n", s_queue_cur->t.tid);
+        load_ctx (&s_queue_cur->cxt);
     }
 
     return 0;
@@ -140,6 +176,7 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
 
     /* 1. Main: Initialize the scheduler queue if not done (lazy init), add main-worker */
     if (s_queue_head == NULL) {
+        printf ("Initializing main thread...\n");
 
         nthread_t t_main;
         t_main.tid = tid_cnt++;
@@ -149,13 +186,12 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
 
         s_queue_cur = s_queue_head = malloc (sizeof (schd_q));
         s_queue_head->t = t_main;
-        s_queue_head->next = malloc (sizeof (schd_q)); 
-        s_queue_head->prev = malloc (sizeof (schd_q));
         s_queue_head->next = s_queue_head;
         s_queue_head->prev = s_queue_head;
     }
 
     /* 2. Main: Set new thread's state and stack */
+    printf ("Initializing requested thread...\n");
     nthread = malloc(sizeof(nthread_t));
     nthread->tid = tid_cnt++;
     nthread->t_state = READY;
@@ -192,11 +228,13 @@ start_schd:
     /* 4. Main: If scheduler is not running, start running it */
     if (!active_scheduler) {
         active_scheduler = 1;
+        printf ("Starting thread schedular context...\n");
         return thread_schedule();
     }
 main_worker_ctx: 
     if (!main_ctx_set) {
         main_ctx_set = 1;
+        printf ("Setting main thread's context...\n");
         save_ctx (&s_queue_head->cxt);
     }
     if (!active_scheduler && s_queue_head) {
