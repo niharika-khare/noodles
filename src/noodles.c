@@ -100,7 +100,7 @@ static int thread_schedule (mcontext_t ctx) {
 
         prev_thread->cxt = ctx;
         if (prev_thread->t_state == FINISHED) {
-            free (prev_thread);
+            munmap (prev_thread->t_stack, 2 * MAX_STACK_SIZE);
         }
     }    
     /* If main is the only thread then return withour re-enabling the timer */
@@ -115,6 +115,9 @@ static int thread_schedule (mcontext_t ctx) {
         if (tq_cur->t_state == RUNNABLE) {
 
             tq_cur->t_state = RUNNING;
+            /* On aarch64, 16 bytes alignment is mandatory, therefore before writing 
+               to stack, the stack pointer needs to e moved downwards otherwise seg 
+               fault will occur */
             tq_cur->t_stack = (char *) tq_cur->t_stack - 16;
 
             /* 
@@ -196,7 +199,6 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
     }
 
     /* Set new thread's state and stack */
-    nthread = malloc(sizeof(nthread_t));
     nthread->tid = tid_cnt++;
     nthread->t_state = RUNNABLE;
     nthread->t_func = nt_func;
@@ -250,7 +252,6 @@ int noodles_exit () {
 
     tid_cnt--;
     tq_cur->t_state = FINISHED;
-    munmap (tq_cur->t_stack, 2 * MAX_STACK_SIZE);
 
     tq_cur->prev->next = tq_cur->next;
     tq_cur->next->prev = tq_cur->prev;
@@ -267,7 +268,8 @@ int noodles_exit () {
 
 int noodles_join (nthread_t * nthread) {
 
-    // wait for the thread to exit
+    /* busy wait for the thread to finish execution */
+    while (nthread->t_state != FINISHED);
 
     return 0;
 }
