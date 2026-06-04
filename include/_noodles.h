@@ -31,18 +31,22 @@ typedef struct _nthread_t {
     int t_state;
     void * t_stack; 
     void * (* t_func) (void *);
+    void * t_arg;
     sigset_t t_sig_mask;
+    mcontext_t cxt;
+    struct _nthread_t * next;
+    struct _nthread_t * prev;
 
 } nthread_t ;
 
-typedef struct _schd_q {
+// typedef struct _schd_q {
 
-    nthread_t t;
-    mcontext_t cxt;
-    struct _schd_q * next;
-    struct _schd_q * prev;
+//     nthread_t t;
+//     mcontext_t cxt;
+//     struct _schd_q * next;
+//     struct _schd_q * prev;
 
-} schd_q ;
+// } schd_q ;
 
 typedef void (* sig_handler) (int) ;
 
