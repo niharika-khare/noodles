@@ -3,6 +3,7 @@
 
 #include <signal.h>
 #include <stdint.h>
+#include <time.h>
 #include <unistd.h>
 
 static inline size_t _get_pagesize () {
@@ -17,7 +18,7 @@ static inline size_t _get_pagesize () {
 
 /* Thread states */
 
-#define READY               1
+#define RUNNABLE            1
 #define RUNNING             2
 #define BLOCKED             4
 #define FINISHED            8
@@ -39,19 +40,5 @@ typedef struct _nthread_t {
 
 } nthread_t ;
 
-// typedef struct _schd_q {
-
-//     nthread_t t;
-//     mcontext_t cxt;
-//     struct _schd_q * next;
-//     struct _schd_q * prev;
-
-// } schd_q ;
-
-typedef void (* sig_handler) (int) ;
-
-extern void save_ctx (void * ctx);
-extern void load_ctx (void * ctx);
-extern void switch_ctx (void * ctx);
 
 #endif /** _NOODLES_INTERNALS_H_ */
