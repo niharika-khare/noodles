@@ -10,60 +10,37 @@
 
 static int active_scheduler = 0;
 static int active_timer     = 0;
-static int main_ctx_set     = 0;
 static int tid_cnt          = 0;
+
+static timer_t switch_timer;
 
 static nthread_t * tq_cur  = NULL;
 static nthread_t * tq_head = NULL;
 
-// static mcontext_t prempt_ctx;
-// static sigjmp_buf jmp;
+static int init_timer ();
+static int disable_timer ();
+static int activate_timer ();
+static int thread_schedule (mcontext_t);
+static void custom_alarm_signal_handler (int, siginfo_t *, void *);
 
 
-static int thread_schedule (mcontext_t ctx);
-
-unsigned int sleep (unsigned int seconds) {
-
-    struct timespec req;
-    struct timespec rem;
-
-    req.tv_sec = seconds;
-    req.tv_nsec = 0;
-
-    while (nanosleep (&req, &rem) == -1) {
-        req.tv_sec = rem.tv_sec;
-        req.tv_nsec = rem.tv_nsec;
-    }
-    return 0;
-}
-
-
-static void alarm_handler (int sig, siginfo_t * info, void * context) {
-
-    char msg[30] = "Inside the signal handler...\n";
-    write (STDOUT_FILENO, msg, sizeof (msg));
-    ucontext_t * u_ctx = (ucontext_t *) context;
-    
-    thread_schedule (u_ctx->uc_mcontext);
-
-    u_ctx->uc_mcontext = tq_cur->cxt;
-    
-    // siglongjmp (jmp, 2);
-
-}
-
-static timer_t switch_timer;
-
-
+/** Initialize the timer only once */
 static int init_timer () {
 
-    printf ("Creating context switch timer...\n");
+    // Defining signal for switch timer
+    stack_t sigstack;
+    sigstack.ss_sp = malloc (SIGSTKSZ);
+    sigstack.ss_size = SIGSTKSZ;
+    sigstack.ss_flags = 0;
+    sigaltstack (&sigstack, NULL);
+
     struct sigaction sa;
-    sa.sa_sigaction = alarm_handler;
+    sa.sa_sigaction = custom_alarm_signal_handler;
     sigemptyset (&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
     sigaction (SIGUSR1, &sa, NULL);
 
+    // Creating context switch timer
     struct sigevent sigev;
 
     sigev.sigev_notify = SIGEV_SIGNAL;
@@ -73,9 +50,12 @@ static int init_timer () {
     return timer_create (CLOCK_MONOTONIC, &sigev, &switch_timer);
 }
 
+/** 
+ * Inside the signal handler->thread_schdule, timer is disabled. It is 
+ * restarted just before the context switch. This is to ensure that timer 
+ * interrupts are uniform for all threads.
+ * */
 static int disable_timer () {
-
-    printf ("Disabling timer...\n");
 
     struct itimerspec t_spec_pause = {0};
 
@@ -88,13 +68,11 @@ static int disable_timer () {
 
 static int activate_timer () {
 
-    printf ("Activating timer...\n");
-
     struct itimerspec t_spec;
     t_spec.it_value.tv_sec = 0;    
-    t_spec.it_value.tv_nsec = 10000;  
+    t_spec.it_value.tv_nsec = 1000000;  
     t_spec.it_interval.tv_sec = 0;  
-    t_spec.it_interval.tv_nsec = 10000; 
+    t_spec.it_interval.tv_nsec = 1000000; 
 
     if (timer_settime (switch_timer, 0, &t_spec, NULL) == -1) {
         printf ("err: unable to start switch timer\n");
@@ -104,18 +82,13 @@ static int activate_timer () {
 }
 
 
-
+/**
+ * The thread scheduler is called from the inside the signal handler and is 
+ * responsible for disabling/enabling the timer, picking threads in RR, 
+ * saving context of the pre-empted thread, state management of thread and
+ * modification of relevant flags.
+ */
 static int thread_schedule (mcontext_t ctx) {
-
-    // if (init_timer() == -1) {
-    //     printf ("err: unable to create switch timer!\n");
-    //     return -1;
-    // }
-
-    // if (sigsetjmp (jmp, 2) != 0) {
-    //     printf ("Here after the context switch jmp\n");
-    // }
-    
 
     /* Disable preemption while scheduling and context switch */
     if (active_timer) {
@@ -126,91 +99,90 @@ static int thread_schedule (mcontext_t ctx) {
         tq_cur = tq_cur->next;
 
         prev_thread->cxt = ctx;
-        printf ("Saved context for tid: %d\n", prev_thread->tid);
         if (prev_thread->t_state == FINISHED) {
-            printf ("Deallocating prev finished thread %d...\n", prev_thread->tid);
             free (prev_thread);
         }
     }    
-
+    /* If main is the only thread then return withour re-enabling the timer */
     if (tq_cur->next == tq_cur && tq_cur == tq_head) {
 
-        printf ("No thread in queue, resuming main-worker context...\n");
-
         active_scheduler = 0;
-        main_ctx_set     = 0;
-        tid_cnt          = 0;
         active_timer     = 0;
-
-        // mcontext_t main_ctx = tq_cur->cxt;
-        // tq_head = tq_cur = NULL;
-
-        // load_ctx (&main_ctx);
+        /* tid=0 is main, main thread is not removed from the queue */
+        tid_cnt          = 1;
     } 
     else {
-        /* main worker thread */
-        if (tq_cur == tq_head) {
-            printf ("Picked up main thread...\n");
-            tq_cur->cxt = ctx;
-            
-        }
-        else if (tq_cur->t_state == READY) {
-            printf ("Picked up user thread %d...\n", tq_cur->tid);
+        if (tq_cur->t_state == RUNNABLE) {
 
-            // change thread state
             tq_cur->t_state = RUNNING;
-            
-            tq_cur->t_stack = (char *) tq_cur->t_stack - sizeof (uintptr_t);
-            // stack -> push the exit func and args, push thread func and args
-            *((uintptr_t *) tq_cur->t_stack) = (uintptr_t) (tq_cur->t_func);
-            
-            printf ("Here after pushing function on stack\n");
+            tq_cur->t_stack = (char *) tq_cur->t_stack - 16;
 
-            // enable timer
+            /* 
+             Signal handler blocks the source signal. Need to unblock the source 
+             signal as the thread would not be returning back to the signal handler 
+            */
+            sigset_t unblock;
+            sigemptyset (&unblock);
+            sigaddset (&unblock, SIGUSR1);
+            sigprocmask (SIG_UNBLOCK, &unblock, NULL);
+
+            /* Enable timer before context switch to enable further preemption */
             if (!active_timer) {
                 active_timer = 1;
                 activate_timer();
             }
-            // inline asm for executing function on the stack
+
+            /* Set stack and executing function on the stack */
             __asm__ __volatile__ (
                 "mov    sp, %0;"
                 "mov    x0, %1;"
+                "mov    x1, %2;"
+                "mov    x30, %3;"
+                "br     x1;"
                 :
-                : "r" (tq_cur->t_stack), "r" (tq_cur->t_arg)
+                : "r" (tq_cur->t_stack), "r" (tq_cur->t_arg), 
+                  "r" (tq_cur->t_func), "r" (noodles_exit)
             );
-
-
-            // begin thread function execution
-            // assign the declared the stack for the thread here?
-            // initialize thread context here?
-
-            // 4. If next thread is different than current thread, load context, 
         } 
-
-        if (!active_timer) {
+        else if (!active_timer) {
             active_timer = 1;
             activate_timer();
         }
-        if (tq_cur != tq_head) sleep (1);
-
-        // printf ("Loading context of tid %d...\n", tq_cur->t.tid);
-        // load_ctx (&tq_cur->cxt);
+        
     }
-
     return 0;
+}
+
+/**
+ * Handler for the real time signal responsible for thread preemption.
+ * This handler is responsible for context switch.
+ * By replacing the uc_mcontext of the interrupted thread, the kernel's
+ * sigreturn will use the updated uc_mcontext and result into the 
+ * switching of context with full set of GP, SP, PC, CPSR, FP/SMID registers.
+ * 
+ * An alternate apprach of switching context via hand rolled assembly was also 
+ * attempted. While it worked well to replace the registers that are part of the
+ * mcontext_t struct, SMID registers were lost. Need kernel's help in restoring 
+ * those, hence need the sigreturn from inside the signal handler.
+ * */
+static void custom_alarm_signal_handler (int sig, siginfo_t * info, void * context) {
+
+    ucontext_t * u_ctx = (ucontext_t *) context;
+    thread_schedule (u_ctx->uc_mcontext);
+    u_ctx->uc_mcontext = tq_cur->cxt;
+
 }
 
 /**
  * Create a thread, triggered by user's request.
  * If there exists no active thread, then:
  *  1. The main-worker thread would be created.
- *  2. The scheduler would be started/restarted.
+ *  2. The scheduler would be started via a custom timer.
  */
 int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * narg) {
 
-    /* 1. Main: Initialize the scheduler queue if not done (lazy init), add main-worker */
+    /* Initialize the scheduler queue if not done (lazy init), add main-worker */
     if (tq_head == NULL) {
-        printf ("Initializing main thread...\n");
 
         nthread_t * t_main = malloc (sizeof (nthread_t));
         t_main->tid = tid_cnt++;
@@ -223,11 +195,10 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
         tq_cur = tq_head = t_main;
     }
 
-    /* 2. Main: Set new thread's state and stack */
-    printf ("Initializing requested thread...\n");
+    /* Set new thread's state and stack */
     nthread = malloc(sizeof(nthread_t));
     nthread->tid = tid_cnt++;
-    nthread->t_state = READY;
+    nthread->t_state = RUNNABLE;
     nthread->t_func = nt_func;
     nthread->t_arg = narg;
     sigemptyset (&nthread->t_sig_mask);
@@ -245,25 +216,16 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
     }
 
     nthread->t_stack = nthread->t_stack + 2 * MAX_STACK_SIZE;
-    // *((uintptr_t *) nthread->t_stack) = (uintptr_t) nthread->t_func;
-    // nthread->cxt.sp = (long long unsigned int) nthread->t_stack;
 
-    /* 3. Main: Add thread to schedular queue (FIFO circular queue, hence new 
-          thread is always at end i.e. prev of head) */
+    /* Add thread to scheduler queue (FIFO circular queue, hence new thread 
+       is always at end i.e. prev of head) */
     nthread->next = tq_head;
     nthread->prev = tq_head->prev;
     tq_head->prev->next = nthread;
     tq_head->prev = nthread;
     
-    goto main_worker_ctx;
-
-start_schd:
-    /* 4. Main: If scheduler is not running, start running it */
-    // if (!active_scheduler) {
-    //     active_scheduler = 1;
-    //     printf ("Starting thread schedular context...\n");
-    //     return thread_schedule();
-    // }
+    /* Activated whenever the user requests at least one active thread. 
+       If main is the only thread preemption is not needed */
     if (!active_scheduler) {
         active_scheduler = 1;
         if (init_timer() == -1) {
@@ -273,18 +235,35 @@ start_schd:
         active_timer = 1;
         activate_timer ();
     }
-main_worker_ctx: 
-    if (!main_ctx_set) {
-        main_ctx_set = 1;
-        printf ("Setting main thread's context...\n");
-        save_ctx (&tq_head->cxt);
-    }
-    if (!active_scheduler && tq_head) {
-        goto start_schd;
-    }
 
     return 0;
 }
+
+/**
+ * Terminate the current thread.
+ * Schedular also calls this to remove thread from the queue.
+ */
+int noodles_exit () {
+
+    /* Disable preemption for atomicity, will get re-enabled in scheduler after kill () */
+    disable_timer ();
+
+    tid_cnt--;
+    tq_cur->t_state = FINISHED;
+    munmap (tq_cur->t_stack, 2 * MAX_STACK_SIZE);
+
+    tq_cur->prev->next = tq_cur->next;
+    tq_cur->next->prev = tq_cur->prev;
+    
+    static pid_t pid = -1;
+    if (pid == -1) {
+        pid = getpid();
+    }
+    kill (pid, SIGUSR1);
+
+    return 0;
+}
+
 
 int noodles_join (nthread_t * nthread) {
 
@@ -293,23 +272,7 @@ int noodles_join (nthread_t * nthread) {
     return 0;
 }
 
-/**
- * Terminate the current thread.
- * Schedular requests this to remove thread from the queue.
- */
-int noodles_exit (nthread_t * nthread) {
 
-    if (tq_cur == nthread) {
-        tq_cur->prev->next = tq_cur->next;
-        tq_cur->next->prev = tq_cur->prev;
-
-        tq_cur->t_state = FINISHED;
-
-        return 0;
-    }
-
-    return -1;
-}
 
 int noodles_yield (nthread_t * nthread) {
 
