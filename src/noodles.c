@@ -24,10 +24,19 @@ static int thread_schedule (mcontext_t);
 static void custom_alarm_signal_handler (int, siginfo_t *, void *);
 
 
+static inline pid_t get_pid () {
+    static pid_t pid = -1;
+    if (pid == -1) {
+        return getpid ();
+    }
+    return pid;
+}
+
+
 /** Initialize the timer only once */
 static int init_timer () {
 
-    // Defining signal for switch timer
+    /* Defining signal for switch timer */
     stack_t sigstack;
     sigstack.ss_sp = malloc (SIGSTKSZ);
     sigstack.ss_size = SIGSTKSZ;
@@ -40,7 +49,7 @@ static int init_timer () {
     sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
     sigaction (SIGUSR1, &sa, NULL);
 
-    // Creating context switch timer
+    /* Creating context switch timer */
     struct sigevent sigev;
 
     sigev.sigev_notify = SIGEV_SIGNAL;
@@ -115,14 +124,16 @@ static int thread_schedule (mcontext_t ctx) {
         if (tq_cur->t_state == RUNNABLE) {
 
             tq_cur->t_state = RUNNING;
-            /* On aarch64, 16 bytes alignment is mandatory, therefore before writing 
-               to stack, the stack pointer needs to e moved downwards otherwise seg 
-               fault will occur */
+            /* 
+             On aarch64, 16 bytes alignment is mandatory, therefore before writing to 
+             stack, the stack pointer needs to be moved downwards otherwise seg fault 
+             will occur 
+            */
             tq_cur->t_stack = (char *) tq_cur->t_stack - 16;
 
             /* 
-             Signal handler blocks the source signal. Need to unblock the source 
-             signal as the thread would not be returning back to the signal handler 
+             Signal handler blocks the source signal. Need to unblock the source signal 
+             here as the thread would not be returning back to the signal handler 
             */
             sigset_t unblock;
             sigemptyset (&unblock);
@@ -196,6 +207,11 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
         t_main->next = t_main->prev = t_main;
 
         tq_cur = tq_head = t_main;
+        
+        if (init_timer() == -1) {
+            printf ("err: unable to create switch timer!\n");
+            return -1;
+        }
     }
 
     /* Set new thread's state and stack */
@@ -219,21 +235,21 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
 
     nthread->t_stack = nthread->t_stack + 2 * MAX_STACK_SIZE;
 
-    /* Add thread to scheduler queue (FIFO circular queue, hence new thread 
-       is always at end i.e. prev of head) */
+    /* 
+     Add thread to scheduler queue (FIFO circular queue, hence new thread 
+     is always at end i.e. prev of head)
+    */
     nthread->next = tq_head;
     nthread->prev = tq_head->prev;
     tq_head->prev->next = nthread;
     tq_head->prev = nthread;
     
-    /* Activated whenever the user requests at least one active thread. 
-       If main is the only thread preemption is not needed */
+    /* 
+     Activated whenever the user requests at least one active thread. 
+     If main is the only thread preemption is not needed 
+    */
     if (!active_scheduler) {
         active_scheduler = 1;
-        if (init_timer() == -1) {
-            printf ("err: unable to create switch timer!\n");
-            return -1;
-        }
         active_timer = 1;
         activate_timer ();
     }
@@ -247,7 +263,10 @@ int noodles_create (nthread_t * nthread, void * (* nt_func) (void *), void * nar
  */
 int noodles_exit () {
 
-    /* Disable preemption for atomicity, will get re-enabled in scheduler after kill () */
+    /* 
+     Disable preemption for atomicity, will get re-enabled in 
+     scheduler after kill () 
+    */
     disable_timer ();
 
     tid_cnt--;
@@ -256,28 +275,34 @@ int noodles_exit () {
     tq_cur->prev->next = tq_cur->next;
     tq_cur->next->prev = tq_cur->prev;
     
-    static pid_t pid = -1;
-    if (pid == -1) {
-        pid = getpid();
-    }
-    kill (pid, SIGUSR1);
+    /* 
+     Send signal to self to invoke the thread scheduler for immediately 
+     removing the finished thread and pick up the next thread
+    */
+    kill (get_pid (), SIGUSR1);
 
     return 0;
 }
 
-
+/**
+ * Wait for the thread to finish execution, yield is thread is not finished.
+ */
 int noodles_join (nthread_t * nthread) {
 
-    /* busy wait for the thread to finish execution */
-    while (nthread->t_state != FINISHED);
-
+    while (nthread->t_state != FINISHED)
+    {
+        kill (get_pid (), SIGUSR1);
+    }
     return 0;
 }
-
-
 
 int noodles_yield (nthread_t * nthread) {
 
-    // put the thread on sleep/blocked queue
+
+    // if (nthread->t_state == RUNNING) {
+    //     nthread->t_state = BLOCKED;
+    // }
+
+    kill (get_pid (), SIGUSR1);
     return 0;
 }
