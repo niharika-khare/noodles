@@ -148,9 +148,9 @@ static int thread_schedule (mcontext_t ctx) {
 
             /* Set stack and executing function on the stack */
             __asm__ __volatile__ (
-                "mov    sp, %0;"
-                "mov    x0, %1;"
-                "mov    x1, %2;"
+                "mov    sp,  %0;"
+                "mov    x0,  %1;"
+                "mov    x1,  %2;"
                 "mov    x30, %3;"
                 "br     x1;"
                 :
@@ -296,13 +296,15 @@ int noodles_join (nthread_t * nthread) {
     return 0;
 }
 
-int noodles_yield (nthread_t * nthread) {
+int noodles_yield () {
 
-
-    // if (nthread->t_state == RUNNING) {
-    //     nthread->t_state = BLOCKED;
-    // }
+    /* 
+     Disable preemption for atomicity, will get re-enabled in 
+     scheduler after kill () 
+    */
+    disable_timer ();
 
     kill (get_pid (), SIGUSR1);
+
     return 0;
 }
