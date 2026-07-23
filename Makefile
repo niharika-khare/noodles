@@ -6,8 +6,7 @@ BUILD_DIR      := ./build
 INC_DIR   := $(shell find $(INC_ROOT_DIR) -type d)
 INC_FLAGS := $(addprefix -I,$(INC_DIR))
 
-CC_FLAGS  := $(INC_FLAGS) -g -Wall
-
+CC_FLAGS  := $(INC_FLAGS) -g -Wall -MMD
 
 SRC := $(shell find $(SRC_DIR) -name '*.c')
 DEP := $(shell find $(INC_ROOT_DIR) -name '*.h')
