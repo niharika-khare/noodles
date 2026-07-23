@@ -30,8 +30,9 @@ Defined in `include/_noodles.h`: `RUNNABLE`, `RUNNING`, `BLOCKED`, `FINISHED`. `
 
 ## Design notes
 
+- Whenever the first thread creation is invoked, the library shall make 2 threads: (1) a main thread that is responsible for program after the thread creation (2) the actual thread which shall execute the thread function supplied to the creation API. the main thread is created only once in the entire life of the user program and shall retain its postion in the scheduler list even when there are no more user created threads. This will ensure there is o repaeted work whenever the user programs thread count goes from 1 to 0 to 1. 
 - The preemption interval is fixed at 1 ms (`1,000,000` ns) and is set up via `timer_create`/`timer_settime`. The timer is disabled while a context switch is in progress and re-armed just before resuming the next thread, so every thread sees a uniform preemption interval.
-- Source comments note that an earlier approach hand-rolled the context save/restore in assembly, but FP/SIMD registers couldn't be restored that way — the current design instead lets the kernel restore the full context via `sigreturn` from inside the signal handler.
+- An earlier approach with hand-rolled the context save/restore in assembly was attempted, but FP/SIMD registers couldn't be restored that way hence the current design instead lets the kernel restore the full context via `sigreturn` from inside the signal handler.
 - When a thread runs for the first time, its stack pointer is set up and its function entered directly through inline AArch64 assembly (`mov sp, ...; br x1`), with `noodles_exit` pre-loaded into the link register (`x30`) so a thread function that simply returns still triggers proper cleanup.
 - The stack pointer is adjusted down by 16 bytes before use to satisfy AArch64's mandatory 16-byte stack alignment.
 - Each thread's stack is a 2-page `mmap` region: the lower page is the `PROT_NONE` guard page, and the upper page is the usable stack (size = `sysconf(_SC_PAGESIZE)`).
